@@ -7,18 +7,19 @@ from faster_whisper import WhisperModel
 from groq import Groq
 import pandas as pd
 
-# 1. Initialize Directories & Whisper Engine
+# Set your private Admin PIN here
+ADMIN_PIN = "icdtad@1945"  # Change this to any password you want
+
 AUDIO_STORAGE_DIR = "candidate_audios"
 os.makedirs(AUDIO_STORAGE_DIR, exist_ok=True)
 CSV_FILE = "extempore_evaluations.csv"
 
-# Load Whisper on CPU
-whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+if not os.path.exists(CSV_FILE):
+    pd.DataFrame(columns=["Timestamp", "Name", "Email", "Phone Number", "Topic", "Audio File", "Fluency Stats", "Transcript", "Evaluation"]).to_csv(CSV_FILE, index=False)
 
-# Initialize Groq Cloud Client for Llama 3
+whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
-# 2. Selected Professional Topics
 EXTEMPORE_TOPICS = [
     "Describe your ideal professional workspace setup.",
     "Walk me through organizing your daily tasks.",
@@ -31,7 +32,6 @@ EXTEMPORE_TOPICS = [
 def get_initial_topic():
     return random.choice(EXTEMPORE_TOPICS)
 
-# 3. Topic Refresh Logic (Strict 2-Skip Limit)
 def refresh_topic(current_topic, skips_left):
     if skips_left <= 0:
         return current_topic, skips_left, gr.update(interactive=False), "⚠️ Maximum limit of 2 topic changes reached."
@@ -45,37 +45,30 @@ def refresh_topic(current_topic, skips_left):
     
     return new_topic, new_skips, btn_state, status_msg
 
-# 4. Strict 9-Point Grading Rubric
 SYSTEM_PROMPT = """
-You are a strict, expert English communication assessor evaluating a 2-minute Extempore speech.
+You are a fair, objective, and supportive English communication assessor evaluating a 2-minute Extempore speech.
 You will be provided with the candidate's transcript, the assigned topic, and a fluency report showing speech pace and pauses.
 
-Evaluate the candidate strictly on a scale of 1 to 10 across each of the following 9 parameters:
+Evaluate the candidate on a scale of 1 to 10 across each of the following 6 parameters. Be reasonably forgiving of minor mistakes that do not impede overall understanding:
 - Spoken English
-- Grammar
-- Pronunciation (Penalize if transcript contains broken, fragmented, or phonetically garbled words)
-- Sentence Formation
+- Grammar (Do not heavily penalize minor conversational slips)
 - Vocabulary
-- Fluency (Evaluate pacing and lack of long, awkward pauses)
-- Neutral Accent (Penalize if speech recognition struggled with heavy localized inflections)
-- Confidence (Evaluate based on continuous assertive structure and absence of filler hesitation)
-- Ability to think on an unknown topic (Evaluate relevance, flow of thought, and depth on the given prompt)
+- Fluency (Evaluate pacing, but allow for natural conversational pauses)
+- Neutral Accent (Score fairly; only deduct points if heavy localized inflections make the transcript severely fragmented)
+- Confidence (Evaluate based on continuous structure and tone, but allow for minor hesitations)
 
 Output EXACTLY in this format:
 
 Spoken English: [Score]/10
 Grammar: [Score]/10
-Pronunciation: [Score]/10
-Sentence Formation: [Score]/10
 Vocabulary: [Score]/10
 Fluency: [Score]/10
 Neutral Accent: [Score]/10
 Confidence: [Score]/10
-Ability to think on an unknown topic: [Score]/10
 
 Overall Extempore Rating: [Average Score]/10
 
-Detailed Feedback: [2-3 concise sentences detailing specific strengths, grammatical errors, or structural pacing issues.]
+Detailed Feedback: [2-3 concise, encouraging sentences detailing specific strengths and one or two areas for improvement.]
 """
 
 def evaluate_candidate(name, email, phone, current_topic, audio_filepath):
@@ -89,7 +82,6 @@ def evaluate_candidate(name, email, phone, current_topic, audio_filepath):
     saved_audio_path = os.path.join(AUDIO_STORAGE_DIR, saved_audio_filename)
     shutil.copy(audio_filepath, saved_audio_path)
 
-    # Transcription & Speech Timing
     segments, info = whisper_model.transcribe(audio_filepath, beam_size=5)
     transcript = ""
     total_speech_time = 0.0
@@ -100,7 +92,6 @@ def evaluate_candidate(name, email, phone, current_topic, audio_filepath):
     transcript = transcript.strip()
     total_duration = info.duration
 
-    # Fluency Metrics
     if total_duration > 0:
         active_ratio = (total_speech_time / total_duration) * 100
         pause_ratio = max(0.0, 100.0 - active_ratio)
@@ -108,12 +99,11 @@ def evaluate_candidate(name, email, phone, current_topic, audio_filepath):
     else:
         fluency_report = "Audio too short."
 
-    # Llama 3 Evaluation via Groq Cloud
     user_prompt = f"Topic Given: \"{current_topic}\"\nFluency Stats: {fluency_report}\nTranscript: \"{transcript}\""
     
     try:
         completion = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
+            model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt}
@@ -124,7 +114,6 @@ def evaluate_candidate(name, email, phone, current_topic, audio_filepath):
     except Exception as e:
         ai_evaluation = f"AI Evaluation Error: {str(e)}"
 
-    # Save to CSV Database
     log_entry = {
         "Timestamp": [time.strftime("%Y-%m-%d %H:%M:%S")],
         "Name": [name.strip()],
@@ -137,10 +126,7 @@ def evaluate_candidate(name, email, phone, current_topic, audio_filepath):
         "Evaluation": [ai_evaluation]
     }
     df = pd.DataFrame(log_entry)
-    if not os.path.exists(CSV_FILE):
-        df.to_csv(CSV_FILE, index=False)
-    else:
-        df.to_csv(CSV_FILE, mode='a', header=False, index=False)
+    df.to_csv(CSV_FILE, mode='a', header=False, index=False)
 
     return (
         transcript if transcript else "(No clear speech recognized)",
@@ -149,7 +135,13 @@ def evaluate_candidate(name, email, phone, current_topic, audio_filepath):
         gr.update(interactive=False)
     )
 
-# 5. Gradio Web Interface Layout
+# Admin verification logic
+def unlock_admin_download(entered_pin):
+    if entered_pin == ADMIN_PIN:
+        return gr.update(value=CSV_FILE, visible=True), "✅ Access granted."
+    else:
+        return gr.update(visible=False), "❌ Incorrect Admin PIN."
+
 with gr.Blocks(theme=gr.themes.Soft(), title="Extempore Assessment Portal") as demo:
     skips_state = gr.State(value=2)
     
@@ -188,9 +180,15 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Extempore Assessment Portal") as d
             gr.Markdown("### 📊 Assessment Summary")
             status_box = gr.Textbox(label="Transcript", interactive=False, lines=4)
             fluency_box = gr.Textbox(label="Speech Pacing & Pause Ratio", interactive=False)
-            eval_box = gr.Textbox(label="Score Breakdown (9 Criteria)", interactive=False, lines=16)
+            eval_box = gr.Textbox(label="Score Breakdown (6 Criteria)", interactive=False, lines=12)
 
-    # UI Wiring
+    # Protected Admin Download Section
+    with gr.Accordion("🔒 Admin Portal (Download CSV Database)", open=False):
+        pin_input = gr.Textbox(label="Enter Admin PIN", type="password", placeholder="Enter PIN")
+        unlock_btn = gr.Button("Unlock CSV Download", size="sm")
+        admin_status = gr.Markdown("")
+        admin_download_file = gr.File(label="Extempore Database Export", visible=False)
+
     refresh_btn.click(
         fn=refresh_topic,
         inputs=[topic_display, skips_state],
@@ -201,6 +199,12 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Extempore Assessment Portal") as d
         fn=evaluate_candidate,
         inputs=[name_input, email_input, phone_input, topic_display, audio_input],
         outputs=[status_box, fluency_box, eval_box, refresh_btn]
+    )
+
+    unlock_btn.click(
+        fn=unlock_admin_download,
+        inputs=[pin_input],
+        outputs=[admin_download_file, admin_status]
     )
 
 if __name__ == "__main__":
