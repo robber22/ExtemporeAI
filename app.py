@@ -4,17 +4,19 @@ import random
 import shutil
 import gradio as gr
 from faster_whisper import WhisperModel
-import ollama
+from groq import Groq
 import pandas as pd
 
-# 1. Directories & AI Setup
+# 1. Initialize Directories & Whisper Engine
 AUDIO_STORAGE_DIR = "candidate_audios"
 os.makedirs(AUDIO_STORAGE_DIR, exist_ok=True)
 CSV_FILE = "extempore_evaluations.csv"
 
-print("Loading Whisper speech engine...")
+# Load Whisper on CPU
 whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
-print("Ready!")
+
+# Initialize Groq Cloud Client for Llama 3
+client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 # 2. Selected Professional Topics
 EXTEMPORE_TOPICS = [
@@ -32,7 +34,7 @@ def get_initial_topic():
 # 3. Topic Refresh Logic (Strict 2-Skip Limit)
 def refresh_topic(current_topic, skips_left):
     if skips_left <= 0:
-        return current_topic, skips_left, gr.update(interactive=False), "⚠️ You have reached the maximum limit of 2 topic changes."
+        return current_topic, skips_left, gr.update(interactive=False), "⚠️ Maximum limit of 2 topic changes reached."
     
     available_topics = [t for t in EXTEMPORE_TOPICS if t != current_topic]
     new_topic = random.choice(available_topics)
@@ -77,13 +79,11 @@ Detailed Feedback: [2-3 concise sentences detailing specific strengths, grammati
 """
 
 def evaluate_candidate(name, email, phone, current_topic, audio_filepath):
-    # Validation checks
     if not name.strip() or not email.strip() or not phone.strip():
         return "⚠️ Error: Please fill in your Name, Email, and Phone Number.", "", "", gr.update()
     if not audio_filepath:
         return "⚠️ Error: No audio recording detected. Please record your answer.", "", "", gr.update()
 
-    # Save audio permanently using a clean identifier
     clean_identifier = email.replace("@", "_").replace(".", "_").strip()
     saved_audio_filename = f"{clean_identifier}_{phone.strip()}_{int(time.time())}.wav"
     saved_audio_path = os.path.join(AUDIO_STORAGE_DIR, saved_audio_filename)
@@ -108,18 +108,19 @@ def evaluate_candidate(name, email, phone, current_topic, audio_filepath):
     else:
         fluency_report = "Audio too short."
 
-    # Ollama Evaluation
+    # Llama 3 Evaluation via Groq Cloud
     user_prompt = f"Topic Given: \"{current_topic}\"\nFluency Stats: {fluency_report}\nTranscript: \"{transcript}\""
     
     try:
-        response = ollama.chat(
-            model='llama3',
+        completion = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
             messages=[
-                {'role': 'system', 'content': SYSTEM_PROMPT},
-                {'role': 'user', 'content': user_prompt}
-            ]
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.3
         )
-        ai_evaluation = response['message']['content']
+        ai_evaluation = completion.choices[0].message.content
     except Exception as e:
         ai_evaluation = f"AI Evaluation Error: {str(e)}"
 
@@ -145,10 +146,10 @@ def evaluate_candidate(name, email, phone, current_topic, audio_filepath):
         transcript if transcript else "(No clear speech recognized)",
         fluency_report,
         ai_evaluation,
-        gr.update(interactive=False)  # Lock the refresh button upon submission
+        gr.update(interactive=False)
     )
 
-# 5. Web Interface Layout
+# 5. Gradio Web Interface Layout
 with gr.Blocks(theme=gr.themes.Soft(), title="Extempore Assessment Portal") as demo:
     skips_state = gr.State(value=2)
     
@@ -189,14 +190,13 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Extempore Assessment Portal") as d
             fluency_box = gr.Textbox(label="Speech Pacing & Pause Ratio", interactive=False)
             eval_box = gr.Textbox(label="Score Breakdown (9 Criteria)", interactive=False, lines=16)
 
-    # Wire Refresh Logic
+    # UI Wiring
     refresh_btn.click(
         fn=refresh_topic,
         inputs=[topic_display, skips_state],
         outputs=[topic_display, skips_state, refresh_btn, skip_status]
     )
 
-    # Wire Submission Logic
     submit_btn.click(
         fn=evaluate_candidate,
         inputs=[name_input, email_input, phone_input, topic_display, audio_input],
@@ -204,4 +204,4 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Extempore Assessment Portal") as d
     )
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=10000)
+    demo.launch()
