@@ -72,7 +72,7 @@ def refresh_topic(current_topic, skips_left):
 def unlock_recorder():
     # Called by the browser when the 10s countdown hits zero
     return (
-        "### 🔴 PREPARATION OVER! Recording started automatically. You have 2 minutes.",
+        '<div style="font-size:28px;font-weight:700;color:#e60000;">🔴 PREPARATION OVER! Recording started automatically. You have 2 minutes.</div>',
         gr.update(visible=True),
         gr.update(visible=False)
     )
@@ -89,13 +89,13 @@ CRITICAL INSTRUCTION: "Topic Relevance" is the absolute highest priority metric.
 
 Evaluate the candidate on a scale of 1 to 10 across each of the following 7 parameters:
 
-* Spoken English (Be reasonably forgiving of minor mistakes)
-* Grammar (Do not heavily penalize minor conversational slips)
-* Vocabulary
-* Fluency (Evaluate pacing, but allow for natural conversational pauses)
-* Neutral Accent (Score fairly; only deduct points if heavy localized inflections make the transcript severely fragmented)
-* Confidence (Evaluate based on continuous structure and tone, but allow for minor hesitations)
-* Topic Relevance (HIGHEST PRIORITY: Evaluate how accurately the candidate's response addresses the assigned topic. If the response is entirely off-topic, this score must be a 1 or 2, and the Overall Rating must absolutely not exceed 4/10).
+- Spoken English (Be reasonably forgiving of minor mistakes)
+- Grammar (Do not heavily penalize minor conversational slips)
+- Vocabulary
+- Fluency (Evaluate pacing, but allow for natural conversational pauses)
+- Neutral Accent (Score fairly; only deduct points if heavy localized inflections make the transcript severely fragmented)
+- Confidence (Evaluate based on continuous structure and tone, but allow for minor hesitations)
+- Topic Relevance (HIGHEST PRIORITY: Evaluate how accurately the candidate's response addresses the assigned topic. If the response is entirely off-topic, this score must be a 1 or 2, and the Overall Rating must absolutely not exceed 4/10).
 
 Output EXACTLY in this format:
 Spoken English: [Score]/10
@@ -143,7 +143,7 @@ def evaluate_candidate(name, email, phone, current_topic, audio_filepath):
 
     try:
         completion = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="openai/gpt-oss-20b",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt}
@@ -228,13 +228,16 @@ function(val) {
     const timerEl = document.querySelector('#timer_display');
     let n = 10;
     const render = () => {
-        if (timerEl) timerEl.innerHTML = '<h3>⏳ Preparation Time: ' + n + ' seconds remaining...</h3>';
+        if (timerEl) timerEl.innerHTML =
+            '<div style="font-size:28px;font-weight:700;color:#e60000;">⏳ Preparation Time: '
+            + n + (n === 1 ? ' second' : ' seconds') + ' remaining...</div>';
     };
     render();
 
     window.__prepInterval = setInterval(() => {
         n -= 1;
-        if (n > 0) { render(); return; }
+        render();                      // shows 9, 8, ... 1, 0
+        if (n > 0) return;
         clearInterval(window.__prepInterval);
         window.__prepInterval = null;
 
