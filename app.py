@@ -20,10 +20,11 @@ if not os.path.exists(CSV_FILE):
 whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
+# Dictionary to securely track countdowns for multiple users simultaneously
+active_timers = {}
+
 # ==========================================
 # 📝 CHANGE YOUR QUESTIONS HERE
-# Delete these and type your new questions inside the quotes.
-# You can add as many as you want by adding a comma after each line.
 # ==========================================
 EXTEMPORE_TOPICS = [
     "If you could exchange lives with any person for one day, who would you choose?",
@@ -39,14 +40,24 @@ EXTEMPORE_TOPICS = [
 # Timer and Reveal Logic
 def reveal_topic():
     topic = random.choice(EXTEMPORE_TOPICS)
-    # Returns: New Topic, Hides Reveal Button, Shows Topic Box, Shows Change Button
-    return topic, gr.update(visible=False), gr.update(visible=True), gr.update(visible=True)
+    # Returns: Topic Box (Value + Visible), Hides Reveal Button, Shows Change Button
+    return gr.update(value=topic, visible=True), gr.update(visible=False), gr.update(visible=True)
 
-def run_countdown():
+def run_countdown(request: gr.Request):
+    session_id = request.session_hash if request else "local"
+    # Increment the timer ID for this specific user. 
+    # If they click skip, a new ID is generated and the old loop aborts.
+    active_timers[session_id] = active_timers.get(session_id, 0) + 1
+    my_run_id = active_timers[session_id]
+    
     for i in range(10, 0, -1):
-        yield f"### ⏳ Preparation Time: {i} seconds remaining...", gr.update(visible=False)
+        if active_timers.get(session_id) != my_run_id:
+            return # A new timer was started by a skip, abort this old one silently
+        yield f"### ⏳ Preparation Time: {i} seconds remaining...", gr.update(visible=False), "WAITING"
         time.sleep(1)
-    yield "### 🔴 PREPARATION OVER! The recorder is unlocked. You have 2 minutes.", gr.update(visible=True)
+        
+    if active_timers.get(session_id) == my_run_id:
+        yield "### 🔴 PREPARATION OVER! Recording started automatically. You have 2 minutes.", gr.update(visible=True), "START_RECORDING"
 
 def refresh_topic(current_topic, skips_left):
     if skips_left <= 0:
@@ -54,7 +65,7 @@ def refresh_topic(current_topic, skips_left):
     
     available_topics = [t for t in EXTEMPORE_TOPICS if t != current_topic]
     if not available_topics:
-        available_topics = EXTEMPORE_TOPICS # Fallback if list is too small
+        available_topics = EXTEMPORE_TOPICS
     
     new_topic = random.choice(available_topics)
     new_skips = skips_left - 1
@@ -169,10 +180,26 @@ def unlock_admin_download(entered_pin):
 with gr.Blocks(theme=gr.themes.Soft(), title="Extempore Assessment Portal") as demo:
     skips_state = gr.State(value=2)
     
+    # Hidden component used to trigger JavaScript frontend actions
+    js_trigger = gr.Textbox(visible=False)
+    
+    # 1. Ask for Microphone Permission immediately on page load
+    demo.load(
+        fn=None,
+        js="""function() {
+            navigator.mediaDevices.getUserMedia({ audio: true })
+            .then(stream => {
+                stream.getTracks().forEach(track => track.stop());
+            })
+            .catch(err => console.log('Mic permission error:', err));
+        }"""
+    )
+    
     gr.Markdown(
         """
         # 🎙️ Extempore Communication Assessment
-        Please enter your details below. Once you reveal your topic, a **10-second preparation timer** will begin before the microphone unlocks.
+        Please enter your details below. Once you reveal your topic, a **10-second preparation timer** will begin. 
+        **The recording will start automatically** after the timer ends.
         """
     )
     
@@ -184,20 +211,16 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Extempore Assessment Portal") as d
             
             gr.Markdown("### 📋 Your Extempore Topic:")
             
-            # Button to start the process
             reveal_btn = gr.Button("👀 Reveal Topic & Start Prep Timer", variant="primary")
             
-            # Hidden elements that appear after clicking Reveal
             topic_display = gr.Textbox(label="Assigned Topic", interactive=False, visible=False)
             
             with gr.Row():
                 refresh_btn = gr.Button("🔄 Change Topic (Max 2)", size="sm", visible=False)
             skip_status = gr.Markdown("*(You can randomize the topic up to 2 times during your 10s prep time)*")
             
-            # Timer Display
             timer_display = gr.Markdown("### ⏳ Awaiting Topic Reveal...")
             
-            # Audio Input starts completely hidden
             audio_input = gr.Audio(
                 sources=["microphone", "upload"], 
                 type="filepath", 
@@ -221,16 +244,43 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Extempore Assessment Portal") as d
     # UI Wiring for the Timer Sequence
     reveal_btn.click(
         fn=reveal_topic,
-        outputs=[topic_display, reveal_btn, topic_display, refresh_btn]
+        outputs=[topic_display, reveal_btn, refresh_btn]
     ).then(
         fn=run_countdown,
-        outputs=[timer_display, audio_input]
+        outputs=[timer_display, audio_input, js_trigger]
     )
 
     refresh_btn.click(
         fn=refresh_topic,
         inputs=[topic_display, skips_state],
         outputs=[topic_display, skips_state, refresh_btn, skip_status]
+    ).then(
+        fn=run_countdown,
+        outputs=[timer_display, audio_input, js_trigger]
+    )
+    
+    # 2. Start and Stop Recording Automatically via JavaScript
+    js_trigger.change(
+        fn=None,
+        inputs=[js_trigger],
+        js="""function(val) {
+            if(val === 'START_RECORDING') {
+                const buttons = Array.from(document.querySelectorAll('button'));
+                const recordBtn = buttons.find(b => b.innerText.includes('Record') || (b.getAttribute('aria-label') && b.getAttribute('aria-label').toLowerCase().includes('record')));
+                if (recordBtn) {
+                    recordBtn.click();
+                }
+                
+                // Automatically click stop after exactly 2 minutes
+                setTimeout(() => {
+                    const stopBtns = Array.from(document.querySelectorAll('button'));
+                    const stopBtn = stopBtns.find(b => b.innerText.includes('Stop') || (b.getAttribute('aria-label') && b.getAttribute('aria-label').toLowerCase().includes('stop')));
+                    if (stopBtn) {
+                        stopBtn.click();
+                    }
+                }, 120000); 
+            }
+        }"""
     )
 
     submit_btn.click(
