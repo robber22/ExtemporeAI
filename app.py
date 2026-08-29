@@ -8,20 +8,18 @@ from groq import Groq
 import pandas as pd
 
 # Set your private Admin PIN here
-ADMIN_PIN = "1234"
+ADMIN_PIN = "icdtad@1945"
 
 AUDIO_STORAGE_DIR = "candidate_audios"
 os.makedirs(AUDIO_STORAGE_DIR, exist_ok=True)
 CSV_FILE = "extempore_evaluations.csv"
 
 if not os.path.exists(CSV_FILE):
-    pd.DataFrame(columns=["Timestamp", "Name", "Email", "Phone Number", "Topic", "Audio File", "Fluency Stats", "Transcript", "Evaluation"]).to_csv(CSV_FILE, index=False)
+    pd.DataFrame(columns=["Timestamp", "Name", "Email", "Phone Number", "Topic", "Audio File",
+                          "Fluency Stats", "Transcript", "Evaluation"]).to_csv(CSV_FILE, index=False)
 
 whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-
-# Dictionary to securely track countdowns for multiple users simultaneously
-active_timers = {}
 
 # ==========================================
 # 📝 CHANGE YOUR QUESTIONS HERE
@@ -37,43 +35,48 @@ EXTEMPORE_TOPICS = [
 ]
 # ==========================================
 
-# Timer and Reveal Logic
+
+# ---------- Reveal / Refresh (timer itself now runs in the browser) ----------
+
 def reveal_topic():
     topic = random.choice(EXTEMPORE_TOPICS)
-    # Returns: Topic Box (Value + Visible), Hides Reveal Button, Shows Change Button
-    return gr.update(value=topic, visible=True), gr.update(visible=False), gr.update(visible=True)
+    # Topic box (value + visible), hide Reveal button, show Change button, start timer
+    return (
+        gr.update(value=topic, visible=True),
+        gr.update(visible=False),
+        gr.update(visible=True),
+        f"START_{time.time()}"
+    )
 
-def run_countdown(request: gr.Request):
-    session_id = request.session_hash if request else "local"
-    # Increment the timer ID for this specific user. 
-    # If they click skip, a new ID is generated and the old loop aborts.
-    active_timers[session_id] = active_timers.get(session_id, 0) + 1
-    my_run_id = active_timers[session_id]
-    
-    for i in range(10, 0, -1):
-        if active_timers.get(session_id) != my_run_id:
-            return # A new timer was started by a skip, abort this old one silently
-        yield f"### ⏳ Preparation Time: {i} seconds remaining...", gr.update(visible=False), "WAITING"
-        time.sleep(1)
-        
-    if active_timers.get(session_id) == my_run_id:
-        yield "### 🔴 PREPARATION OVER! Recording started automatically. You have 2 minutes.", gr.update(visible=True), "START_RECORDING"
 
 def refresh_topic(current_topic, skips_left):
     if skips_left <= 0:
-        return current_topic, skips_left, gr.update(interactive=False), "⚠️ Maximum limit of 2 topic changes reached."
-    
+        return (current_topic, skips_left, gr.update(interactive=False),
+                "⚠️ Maximum limit of 2 topic changes reached.", gr.update())
+
     available_topics = [t for t in EXTEMPORE_TOPICS if t != current_topic]
     if not available_topics:
         available_topics = EXTEMPORE_TOPICS
-    
+
     new_topic = random.choice(available_topics)
     new_skips = skips_left - 1
-    
-    status_msg = f"Topic refreshed. You have {new_skips} change(s) remaining." if new_skips > 0 else "Topic refreshed. No changes remaining."
+
+    status_msg = f"Topic refreshed. You have {new_skips} change(s) remaining." if new_skips > 0 \
+        else "Topic refreshed. No changes remaining."
     btn_state = gr.update(interactive=(new_skips > 0))
-    
-    return new_topic, new_skips, btn_state, status_msg
+
+    # Every successful skip restarts the 10-second timer
+    return new_topic, new_skips, btn_state, status_msg, f"START_{time.time()}"
+
+
+def unlock_recorder():
+    # Called by the browser when the 10s countdown hits zero
+    return (
+        "### 🔴 PREPARATION OVER! Recording started automatically. You have 2 minutes.",
+        gr.update(visible=True),
+        gr.update(visible=False)
+    )
+
 
 # ==========================================
 # 🧠 NEW UPDATED SYSTEM PROMPT
@@ -86,13 +89,13 @@ CRITICAL INSTRUCTION: "Topic Relevance" is the absolute highest priority metric.
 
 Evaluate the candidate on a scale of 1 to 10 across each of the following 7 parameters:
 
-- Spoken English (Be reasonably forgiving of minor mistakes)
-- Grammar (Do not heavily penalize minor conversational slips)
-- Vocabulary
-- Fluency (Evaluate pacing, but allow for natural conversational pauses)
-- Neutral Accent (Score fairly; only deduct points if heavy localized inflections make the transcript severely fragmented)
-- Confidence (Evaluate based on continuous structure and tone, but allow for minor hesitations)
-- Topic Relevance (HIGHEST PRIORITY: Evaluate how accurately the candidate's response addresses the assigned topic. If the response is entirely off-topic, this score must be a 1 or 2, and the Overall Rating must absolutely not exceed 4/10).
+* Spoken English (Be reasonably forgiving of minor mistakes)
+* Grammar (Do not heavily penalize minor conversational slips)
+* Vocabulary
+* Fluency (Evaluate pacing, but allow for natural conversational pauses)
+* Neutral Accent (Score fairly; only deduct points if heavy localized inflections make the transcript severely fragmented)
+* Confidence (Evaluate based on continuous structure and tone, but allow for minor hesitations)
+* Topic Relevance (HIGHEST PRIORITY: Evaluate how accurately the candidate's response addresses the assigned topic. If the response is entirely off-topic, this score must be a 1 or 2, and the Overall Rating must absolutely not exceed 4/10).
 
 Output EXACTLY in this format:
 Spoken English: [Score]/10
@@ -106,6 +109,7 @@ Overall Extempore Rating: [Weighted Score heavily anchored by Topic Relevance]/1
 
 Detailed Feedback: [2-3 concise, encouraging sentences. If the candidate was off-topic, state this explicitly as the primary reason for a lower score.]
 """
+
 
 def evaluate_candidate(name, email, phone, current_topic, audio_filepath):
     if not name.strip() or not email.strip() or not phone.strip():
@@ -136,7 +140,7 @@ def evaluate_candidate(name, email, phone, current_topic, audio_filepath):
         fluency_report = "Audio too short."
 
     user_prompt = f"Topic Given: \"{current_topic}\"\nFluency Stats: {fluency_report}\nTranscript: \"{transcript}\""
-    
+
     try:
         completion = client.chat.completions.create(
             model="llama-3.1-8b-instant",
@@ -171,61 +175,151 @@ def evaluate_candidate(name, email, phone, current_topic, audio_filepath):
         gr.update(interactive=False)
     )
 
+
 def unlock_admin_download(entered_pin):
     if entered_pin == ADMIN_PIN:
         return gr.update(value=CSV_FILE, visible=True), "✅ Access granted."
     else:
         return gr.update(visible=False), "❌ Incorrect Admin PIN."
 
-with gr.Blocks(theme=gr.themes.Soft(), title="Extempore Assessment Portal") as demo:
+
+# ---------- Browser-side helpers ----------
+
+# Hide pause/resume buttons entirely, and hide the two helper textboxes
+CUSTOM_CSS = """
+#audio_input .pause-button,
+#audio_input .resume-button { display: none !important; }
+.hidden-box { display: none !important; }
+"""
+
+# Runs once on page load:
+#  1. asks for microphone permission immediately
+#  2. keeps renaming "Stop" -> "Save" and hiding Pause/Resume, whatever Gradio re-renders
+ON_LOAD_JS = """
+function() {
+    navigator.mediaDevices.getUserMedia({ audio: true })
+        .then(stream => { stream.getTracks().forEach(t => t.stop()); })
+        .catch(err => console.log('Mic permission error:', err));
+
+    const fixButtons = () => {
+        const root = document.querySelector('#audio_input');
+        if (!root) return;
+        root.querySelectorAll('button').forEach(b => {
+            const txt = (b.innerText || '').trim();
+            if (txt === 'Pause' || txt === 'Resume') { b.style.display = 'none'; return; }
+            b.childNodes.forEach(n => {
+                if (n.nodeType === 3 && n.textContent.trim() === 'Stop') n.textContent = 'Save';
+            });
+        });
+    };
+    fixButtons();
+    new MutationObserver(fixButtons).observe(document.body, { childList: true, subtree: true });
+}
+"""
+
+# Runs every time the server sends a new START_<timestamp> value.
+# Restarts the 10s countdown from scratch (any previous countdown / pending auto-save is cancelled).
+COUNTDOWN_JS = """
+function(val) {
+    if (!val || !val.startsWith('START')) return;
+    if (window.__prepInterval) clearInterval(window.__prepInterval);
+    if (window.__saveTimeout)  clearTimeout(window.__saveTimeout);
+
+    const timerEl = document.querySelector('#timer_display');
+    let n = 10;
+    const render = () => {
+        if (timerEl) timerEl.innerHTML = '<h3>⏳ Preparation Time: ' + n + ' seconds remaining...</h3>';
+    };
+    render();
+
+    window.__prepInterval = setInterval(() => {
+        n -= 1;
+        if (n > 0) { render(); return; }
+        clearInterval(window.__prepInterval);
+        window.__prepInterval = null;
+
+        // Tell the server the countdown finished so it can show the recorder and hide Change Topic
+        const box = document.querySelector('#phase_trigger textarea, #phase_trigger input');
+        if (box) {
+            box.value = 'UNLOCK_' + Date.now();
+            box.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+    }, 1000);
+}
+"""
+
+# Runs right after the server has made the recorder visible:
+# clicks Record, then clicks Save exactly 2 minutes later.
+AUTO_RECORD_JS = """
+function() {
+    const findBtn = (cls, words) => {
+        const root = document.querySelector('#audio_input');
+        if (!root) return null;
+        let b = root.querySelector('button.' + cls);
+        if (b) return b;
+        return Array.from(root.querySelectorAll('button')).find(x => {
+            const t = (x.innerText || '').trim();
+            return words.includes(t);
+        }) || null;
+    };
+
+    const tryRecord = (attempt) => {
+        const rec = findBtn('record-button', ['Record']);
+        if (rec) {
+            rec.click();
+            window.__saveTimeout = setTimeout(() => {
+                const save = findBtn('stop-button', ['Save', 'Stop']);
+                if (save) save.click();
+            }, 120000);
+        } else if (attempt < 20) {
+            setTimeout(() => tryRecord(attempt + 1), 250);
+        }
+    };
+    tryRecord(0);
+}
+"""
+
+
+with gr.Blocks(theme=gr.themes.Soft(), title="Extempore Assessment Portal", css=CUSTOM_CSS) as demo:
     skips_state = gr.State(value=2)
-    
-    # Hidden component used to trigger JavaScript frontend actions
-    js_trigger = gr.Textbox(visible=False)
-    
-    # 1. Ask for Microphone Permission immediately on page load
-    demo.load(
-        fn=None,
-        js="""function() {
-            navigator.mediaDevices.getUserMedia({ audio: true })
-            .then(stream => {
-                stream.getTracks().forEach(track => track.stop());
-            })
-            .catch(err => console.log('Mic permission error:', err));
-        }"""
-    )
-    
+
+    # Server -> browser: restart countdown
+    js_trigger = gr.Textbox(elem_id="js_trigger", elem_classes=["hidden-box"])
+    # Browser -> server: countdown finished
+    phase_trigger = gr.Textbox(elem_id="phase_trigger", elem_classes=["hidden-box"])
+
+    demo.load(fn=None, js=ON_LOAD_JS)
+
     gr.Markdown(
         """
         # 🎙️ Extempore Communication Assessment
-        Please enter your details below. Once you reveal your topic, a **10-second preparation timer** will begin. 
+        Please enter your details below. Once you reveal your topic, a **10-second preparation timer** will begin.
         **The recording will start automatically** after the timer ends.
         """
     )
-    
+
     with gr.Row():
         with gr.Column(scale=1):
             name_input = gr.Textbox(label="Full Name", placeholder="e.g. Alex Johnson")
             email_input = gr.Textbox(label="Email Address", placeholder="e.g. alex@example.com")
             phone_input = gr.Textbox(label="Phone Number", placeholder="e.g. +1 555-0199")
-            
+
             gr.Markdown("### 📋 Your Extempore Topic:")
-            
             reveal_btn = gr.Button("👀 Reveal Topic & Start Prep Timer", variant="primary")
-            
+
             topic_display = gr.Textbox(label="Assigned Topic", interactive=False, visible=False)
-            
+
             with gr.Row():
                 refresh_btn = gr.Button("🔄 Change Topic (Max 2)", size="sm", visible=False)
             skip_status = gr.Markdown("*(You can randomize the topic up to 2 times during your 10s prep time)*")
-            
-            timer_display = gr.Markdown("### ⏳ Awaiting Topic Reveal...")
-            
+
+            timer_display = gr.Markdown("### ⏳ Awaiting Topic Reveal...", elem_id="timer_display")
             audio_input = gr.Audio(
-                sources=["microphone", "upload"], 
-                type="filepath", 
+                sources=["microphone", "upload"],
+                type="filepath",
                 label="Record Your Speech (Target: 2 minutes)",
-                visible=False
+                visible=False,
+                elem_id="audio_input"
             )
             submit_btn = gr.Button("Submit Assessment", variant="primary")
 
@@ -241,47 +335,26 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Extempore Assessment Portal") as d
         admin_status = gr.Markdown("")
         admin_download_file = gr.File(label="Extempore Database Export", visible=False)
 
-    # UI Wiring for the Timer Sequence
+    # ---- Wiring ----
     reveal_btn.click(
         fn=reveal_topic,
-        outputs=[topic_display, reveal_btn, refresh_btn]
-    ).then(
-        fn=run_countdown,
-        outputs=[timer_display, audio_input, js_trigger]
+        outputs=[topic_display, reveal_btn, refresh_btn, js_trigger]
     )
 
     refresh_btn.click(
         fn=refresh_topic,
         inputs=[topic_display, skips_state],
-        outputs=[topic_display, skips_state, refresh_btn, skip_status]
-    ).then(
-        fn=run_countdown,
-        outputs=[timer_display, audio_input, js_trigger]
+        outputs=[topic_display, skips_state, refresh_btn, skip_status, js_trigger]
     )
-    
-    # 2. Start and Stop Recording Automatically via JavaScript
-    js_trigger.change(
-        fn=None,
-        inputs=[js_trigger],
-        js="""function(val) {
-            if(val === 'START_RECORDING') {
-                const buttons = Array.from(document.querySelectorAll('button'));
-                const recordBtn = buttons.find(b => b.innerText.includes('Record') || (b.getAttribute('aria-label') && b.getAttribute('aria-label').toLowerCase().includes('record')));
-                if (recordBtn) {
-                    recordBtn.click();
-                }
-                
-                // Automatically click stop after exactly 2 minutes
-                setTimeout(() => {
-                    const stopBtns = Array.from(document.querySelectorAll('button'));
-                    const stopBtn = stopBtns.find(b => b.innerText.includes('Stop') || (b.getAttribute('aria-label') && b.getAttribute('aria-label').toLowerCase().includes('stop')));
-                    if (stopBtn) {
-                        stopBtn.click();
-                    }
-                }, 120000); 
-            }
-        }"""
-    )
+
+    # Countdown runs in the browser; restarts on every new START_ value
+    js_trigger.change(fn=None, inputs=[js_trigger], js=COUNTDOWN_JS)
+
+    # Countdown finished -> show recorder, hide Change Topic, then auto-Record / auto-Save
+    phase_trigger.change(
+        fn=unlock_recorder,
+        outputs=[timer_display, audio_input, refresh_btn]
+    ).then(fn=None, js=AUTO_RECORD_JS)
 
     submit_btn.click(
         fn=evaluate_candidate,
