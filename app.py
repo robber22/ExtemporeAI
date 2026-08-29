@@ -8,7 +8,7 @@ from groq import Groq
 import pandas as pd
 
 # Set your private Admin PIN here
-ADMIN_PIN = "icdtad@1945"  # Change this to any password you want
+ADMIN_PIN = "1234"
 
 AUDIO_STORAGE_DIR = "candidate_audios"
 os.makedirs(AUDIO_STORAGE_DIR, exist_ok=True)
@@ -20,23 +20,42 @@ if not os.path.exists(CSV_FILE):
 whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
 client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
+# ==========================================
+# 📝 CHANGE YOUR QUESTIONS HERE
+# Delete these and type your new questions inside the quotes.
+# You can add as many as you want by adding a comma after each line.
+# ==========================================
 EXTEMPORE_TOPICS = [
-    "Describe your ideal professional workspace setup.",
-    "Walk me through organizing your daily tasks.",
-    "The most useful software you use daily.",
-    "How you prepare for an important meeting.",
-    "Working from home versus the office environment.",
-    "Describe your preferred style of team communication."
+    "If you could exchange lives with any person for one day, who would you choose?",
+    "If you were given ₹10 crore but had to spend it all in 24 hours, how would you spend it?",
+    "Would you choose a high-paying job you hate or a low-paying job you love? Why?",
+    "Can money buy happiness?",
+    "Would you rather know your future or be able to change your past?",
+    "If there were no internet for one month, what would you do?",
+    "If you could go back to being 10 years old for one day, what would you do?"
 ]
+# ==========================================
 
-def get_initial_topic():
-    return random.choice(EXTEMPORE_TOPICS)
+# Timer and Reveal Logic
+def reveal_topic():
+    topic = random.choice(EXTEMPORE_TOPICS)
+    # Returns: New Topic, Hides Reveal Button, Shows Topic Box, Shows Change Button
+    return topic, gr.update(visible=False), gr.update(visible=True), gr.update(visible=True)
+
+def run_countdown():
+    for i in range(10, 0, -1):
+        yield f"### ⏳ Preparation Time: {i} seconds remaining...", gr.update(visible=False)
+        time.sleep(1)
+    yield "### 🔴 PREPARATION OVER! The recorder is unlocked. You have 2 minutes.", gr.update(visible=True)
 
 def refresh_topic(current_topic, skips_left):
     if skips_left <= 0:
         return current_topic, skips_left, gr.update(interactive=False), "⚠️ Maximum limit of 2 topic changes reached."
     
     available_topics = [t for t in EXTEMPORE_TOPICS if t != current_topic]
+    if not available_topics:
+        available_topics = EXTEMPORE_TOPICS # Fallback if list is too small
+    
     new_topic = random.choice(available_topics)
     new_skips = skips_left - 1
     
@@ -45,6 +64,9 @@ def refresh_topic(current_topic, skips_left):
     
     return new_topic, new_skips, btn_state, status_msg
 
+# ==========================================
+# 🧠 NEW UPDATED SYSTEM PROMPT
+# ==========================================
 SYSTEM_PROMPT = """
 You are a fair, objective, and supportive English communication assessor evaluating a 2-minute Extempore speech.
 You will be provided with the candidate's transcript, the assigned topic, and a fluency report showing speech pace and pauses.
@@ -106,7 +128,7 @@ def evaluate_candidate(name, email, phone, current_topic, audio_filepath):
     
     try:
         completion = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt}
@@ -138,7 +160,6 @@ def evaluate_candidate(name, email, phone, current_topic, audio_filepath):
         gr.update(interactive=False)
     )
 
-# Admin verification logic
 def unlock_admin_download(entered_pin):
     if entered_pin == ADMIN_PIN:
         return gr.update(value=CSV_FILE, visible=True), "✅ Access granted."
@@ -151,7 +172,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Extempore Assessment Portal") as d
     gr.Markdown(
         """
         # 🎙️ Extempore Communication Assessment
-        Please enter your details below, check your assigned topic, and record your spoken answer for **up to 2 minutes**.
+        Please enter your details below. Once you reveal your topic, a **10-second preparation timer** will begin before the microphone unlocks.
         """
     )
     
@@ -162,20 +183,26 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Extempore Assessment Portal") as d
             phone_input = gr.Textbox(label="Phone Number", placeholder="e.g. +1 555-0199")
             
             gr.Markdown("### 📋 Your Extempore Topic:")
-            topic_display = gr.Textbox(
-                value=get_initial_topic, 
-                interactive=False, 
-                label="Assigned Topic"
-            )
+            
+            # Button to start the process
+            reveal_btn = gr.Button("👀 Reveal Topic & Start Prep Timer", variant="primary")
+            
+            # Hidden elements that appear after clicking Reveal
+            topic_display = gr.Textbox(label="Assigned Topic", interactive=False, visible=False)
             
             with gr.Row():
-                refresh_btn = gr.Button("🔄 Change Topic (Max 2)", size="sm")
-            skip_status = gr.Markdown("*(You can randomize the topic up to 2 times before recording)*")
+                refresh_btn = gr.Button("🔄 Change Topic (Max 2)", size="sm", visible=False)
+            skip_status = gr.Markdown("*(You can randomize the topic up to 2 times during your 10s prep time)*")
             
+            # Timer Display
+            timer_display = gr.Markdown("### ⏳ Awaiting Topic Reveal...")
+            
+            # Audio Input starts completely hidden
             audio_input = gr.Audio(
                 sources=["microphone", "upload"], 
                 type="filepath", 
-                label="Record Your Speech (Target: 2 minutes)"
+                label="Record Your Speech (Target: 2 minutes)",
+                visible=False
             )
             submit_btn = gr.Button("Submit Assessment", variant="primary")
 
@@ -183,14 +210,22 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Extempore Assessment Portal") as d
             gr.Markdown("### 📊 Assessment Summary")
             status_box = gr.Textbox(label="Transcript", interactive=False, lines=4)
             fluency_box = gr.Textbox(label="Speech Pacing & Pause Ratio", interactive=False)
-            eval_box = gr.Textbox(label="Score Breakdown (6 Criteria)", interactive=False, lines=12)
+            eval_box = gr.Textbox(label="Score Breakdown (7 Criteria)", interactive=False, lines=13)
 
-    # Protected Admin Download Section
     with gr.Accordion("🔒 Admin Portal (Download CSV Database)", open=False):
         pin_input = gr.Textbox(label="Enter Admin PIN", type="password", placeholder="Enter PIN")
         unlock_btn = gr.Button("Unlock CSV Download", size="sm")
         admin_status = gr.Markdown("")
         admin_download_file = gr.File(label="Extempore Database Export", visible=False)
+
+    # UI Wiring for the Timer Sequence
+    reveal_btn.click(
+        fn=reveal_topic,
+        outputs=[topic_display, reveal_btn, topic_display, refresh_btn]
+    ).then(
+        fn=run_countdown,
+        outputs=[timer_display, audio_input]
+    )
 
     refresh_btn.click(
         fn=refresh_topic,
